@@ -58,26 +58,34 @@ export function ParticleCanvas({
   useEffect(() => {
     if (!containerRef.current) return;
 
+    const container = containerRef.current;
+
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0a0508);
-    scene.fog = new THREE.FogExp2(0x0a0508, 0.03);
+    scene.background = new THREE.Color(0x0d060a);
+    scene.fog = new THREE.FogExp2(0x0d060a, 0.025);
     sceneRef.current = scene;
 
+    const width = container.clientWidth || 800;
+    const height = container.clientHeight || 600;
+
     const camera = new THREE.PerspectiveCamera(
-      60,
-      containerRef.current.clientWidth / containerRef.current.clientHeight,
+      65,
+      width / height,
       0.1,
       1000
     );
     camera.position.set(0, 2, 12);
-    camera.lookAt(0, 2, 0);
+    camera.lookAt(0, 1.5, 0);
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+    renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setClearColor(0x0a0508, 1);
-    containerRef.current.appendChild(renderer.domElement);
+    renderer.domElement.style.display = 'block';
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
+    container.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
     const ambientLight = new THREE.AmbientLight(0x403040, 0.5);
@@ -97,10 +105,9 @@ export function ParticleCanvas({
     });
     const ground = new THREE.Mesh(groundGeometry, groundMaterial);
     ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -4;
+    ground.position.y = -3;
     scene.add(ground);
 
-    const clock = new THREE.Clock();
     lastTimeRef.current = performance.now();
 
     const animate = () => {
@@ -141,17 +148,25 @@ export function ParticleCanvas({
     animate();
 
     const handleResize = () => {
-      if (!containerRef.current || !camera || !renderer) return;
-      const width = containerRef.current.clientWidth;
-      const height = containerRef.current.clientHeight;
-      camera.aspect = width / height;
+      if (!container || !camera || !renderer) return;
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      if (w <= 0 || h <= 0) return;
+      camera.aspect = w / h;
       camera.updateProjectionMatrix();
-      renderer.setSize(width, height);
+      renderer.setSize(w, h);
     };
 
     window.addEventListener('resize', handleResize);
 
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(container);
+
+    const timeoutId = setTimeout(handleResize, 100);
+
     return () => {
+      clearTimeout(timeoutId);
+      resizeObserver.disconnect();
       window.removeEventListener('resize', handleResize);
       if (animationIdRef.current) {
         cancelAnimationFrame(animationIdRef.current);
@@ -162,8 +177,8 @@ export function ParticleCanvas({
       if (renderer) {
         renderer.dispose();
       }
-      if (containerRef.current && renderer.domElement) {
-        containerRef.current.removeChild(renderer.domElement);
+      if (container && renderer.domElement) {
+        container.removeChild(renderer.domElement);
       }
     };
   }, []);

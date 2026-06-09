@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { ParticleEmitter, EmitterConfig, EmitterType } from '@/types/particle';
 
-const MAX_PARTICLES = 5000;
+const MAX_PARTICLES = 8000;
 
 interface Particle {
   position: THREE.Vector3;
@@ -13,9 +13,154 @@ interface Particle {
   rotation: number;
   rotationSpeed: number;
   type: number;
+  glow: number;
+  opacity: number;
   active: boolean;
   emitterId: string;
 }
+
+const vertexShader = `
+  attribute float aSize;
+  attribute float aLife;
+  attribute float aMaxLife;
+  attribute vec3 aColor;
+  attribute float aRotation;
+  attribute float aGlow;
+  attribute float aType;
+  attribute float aOpacity;
+
+  varying vec3 vColor;
+  varying float vLife;
+  varying float vGlow;
+  varying float vType;
+  varying float vRotation;
+  varying float vOpacity;
+
+  uniform float uTime;
+  uniform float uPixelRatio;
+
+  void main() {
+    vColor = aColor;
+    vLife = aLife / aMaxLife;
+    vGlow = aGlow;
+    vType = aType;
+    vRotation = aRotation;
+    vOpacity = aOpacity;
+
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    
+    float sizeMultiplier = 1.0;
+    
+    if (vType < 0.5) {
+      sizeMultiplier = sin(vLife * 3.14159) * 0.6 + 0.4;
+    } else if (vType < 1.5) {
+      sizeMultiplier = 0.7 + 0.3 * sin(uTime * 4.0 + position.x * 15.0 + position.z * 10.0);
+    } else if (vType < 2.5) {
+      sizeMultiplier = 0.85 + 0.15 * sin(uTime * 2.5 + position.y * 5.0);
+    } else if (vType < 3.5) {
+      sizeMultiplier = 0.4 + 0.6 * (0.5 + 0.5 * sin(uTime * 5.0 + position.x * 8.0 + position.z * 6.0));
+    } else {
+      sizeMultiplier = 0.8 + 0.2 * sin(uTime * 6.0 + position.z * 15.0);
+    }
+    
+    float lifeFade = smoothstep(0.0, 0.15, vLife) * (1.0 - smoothstep(0.85, 1.0, vLife));
+    
+    gl_PointSize = aSize * sizeMultiplier * lifeFade * uPixelRatio * 320.0 / -mvPosition.z;
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+
+const fragmentShader = `
+  varying vec3 vColor;
+  varying float vLife;
+  varying float vGlow;
+  varying float vType;
+  varying float vRotation;
+  varying float vOpacity;
+
+  void main() {
+    vec2 center = gl_PointCoord - vec2(0.5);
+    float dist = length(center);
+    
+    float alpha = 0.0;
+    vec3 color = vColor;
+    
+    float lifeFade = smoothstep(0.0, 0.15, vLife) * (1.0 - smoothstep(0.85, 1.0, vLife));
+    
+    if (vType < 0.5) {
+      float cosR = cos(vRotation);
+      float sinR = sin(vRotation);
+      vec2 rotated = vec2(
+        center.x * cosR - center.y * sinR,
+        center.x * sinR + center.y * cosR
+      );
+      
+      float petal = 1.0 - (abs(rotated.x) * 0.7 + abs(rotated.y) * 1.3);
+      petal = smoothstep(0.0, 0.25, petal);
+      
+      float outerGlow = smoothstep(0.5, 0.0, dist) * 0.3 * vGlow;
+      
+      alpha = (petal * 0.9 + outerGlow) * lifeFade;
+      
+      vec3 petalColor = vColor * (0.85 + 0.3 * sin(rotated.x * 6.0 + vRotation));
+      color = petalColor;
+    } 
+    else if (vType < 1.5) {
+      float core = smoothstep(0.3, 0.0, dist);
+      float outer = smoothstep(0.5, 0.1, dist) * 0.6;
+      
+      float sparkle = 0.6 + 0.4 * sin(dist * 25.0 - vLife * 60.0 + vRotation * 3.0);
+      
+      alpha = (core + outer * vGlow) * lifeFade * sparkle;
+      color = vColor * (1.0 + vGlow * 0.5);
+    }
+    else if (vType < 2.5) {
+      vec2 uv = gl_PointCoord * 2.0 - 1.0;
+      float x = uv.x * 1.3;
+      float y = -uv.y * 1.3 + 0.2;
+      
+      float heartEquation = pow(x * x + y * y - 0.22, 3.0) - x * x * y * y * y;
+      float heartMask = heartEquation < 0.0 ? 1.0 : 0.0;
+      
+      float edgeGlow = smoothstep(0.5, 0.15, dist) * 0.4;
+      
+      alpha = (heartMask * 0.95 + edgeGlow * vGlow) * lifeFade;
+      
+      float innerBright = smoothstep(0.25, 0.0, dist) * vGlow;
+      color = vColor * (1.0 + innerBright * 0.8);
+    }
+    else if (vType < 3.5) {
+      float core = smoothstep(0.25, 0.0, dist);
+      float glow = smoothstep(0.5, 0.0, dist) * 0.7 * vGlow;
+      
+      float flicker = 0.6 + 0.4 * sin(vLife * 25.0 + vRotation);
+      
+      alpha = (core + glow) * lifeFade * flicker;
+      color = vColor * (1.0 + vGlow * 0.6);
+    }
+    else {
+      float core = smoothstep(0.12, 0.0, dist);
+      
+      float angle = atan(center.y, center.x);
+      float rayAngle = abs(sin(angle * 4.0 + vRotation));
+      float rays = smoothstep(0.4, 0.0, dist) * rayAngle * 0.4;
+      
+      float glow = smoothstep(0.5, 0.0, dist) * 0.35 * vGlow;
+      
+      float twinkle = 0.7 + 0.3 * sin(vLife * 30.0 + vRotation * 5.0);
+      
+      alpha = (core + rays + glow) * lifeFade * twinkle;
+      color = vColor * (1.0 + vGlow * 0.5);
+    }
+    
+    if (vGlow > 0.5) {
+      float bloomGlow = smoothstep(0.5, 0.0, dist) * 0.25 * vGlow * lifeFade;
+      alpha = max(alpha, bloomGlow);
+    }
+    
+    gl_FragColor = vec4(color, alpha * vOpacity);
+  }
+`;
 
 export class ParticleEngine {
   private particles: Particle[] = [];
@@ -37,6 +182,7 @@ export class ParticleEngine {
   private rotationAttribute: Float32Array;
   private glowAttribute: Float32Array;
   private typeAttribute: Float32Array;
+  private opacityAttribute: Float32Array;
 
   constructor() {
     this.geometry = new THREE.BufferGeometry();
@@ -48,6 +194,7 @@ export class ParticleEngine {
     this.rotationAttribute = new Float32Array(MAX_PARTICLES);
     this.glowAttribute = new Float32Array(MAX_PARTICLES);
     this.typeAttribute = new Float32Array(MAX_PARTICLES);
+    this.opacityAttribute = new Float32Array(MAX_PARTICLES);
 
     this.geometry.setAttribute('position', new THREE.BufferAttribute(this.positionAttribute, 3));
     this.geometry.setAttribute('aColor', new THREE.BufferAttribute(this.colorAttribute, 3));
@@ -57,147 +204,18 @@ export class ParticleEngine {
     this.geometry.setAttribute('aRotation', new THREE.BufferAttribute(this.rotationAttribute, 1));
     this.geometry.setAttribute('aGlow', new THREE.BufferAttribute(this.glowAttribute, 1));
     this.geometry.setAttribute('aType', new THREE.BufferAttribute(this.typeAttribute, 1));
+    this.geometry.setAttribute('aOpacity', new THREE.BufferAttribute(this.opacityAttribute, 1));
 
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         uTime: { value: 0 },
         uPixelRatio: { value: Math.min(window.devicePixelRatio, 2) },
       },
-      vertexShader: `
-        attribute float aSize;
-        attribute float aLife;
-        attribute float aMaxLife;
-        attribute vec3 aColor;
-        attribute float aRotation;
-        attribute float aGlow;
-        attribute float aType;
-
-        varying vec3 vColor;
-        varying float vLife;
-        varying float vGlow;
-        varying float vType;
-        varying float vRotation;
-
-        uniform float uTime;
-        uniform float uPixelRatio;
-
-        void main() {
-          vColor = aColor;
-          vLife = aLife / aMaxLife;
-          vGlow = aGlow;
-          vType = aType;
-          vRotation = aRotation;
-
-          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-          
-          float sizeMultiplier = 1.0;
-          
-          if (vType < 0.5) {
-            sizeMultiplier = sin(vLife * 3.14159) * 0.5 + 0.5;
-          } else if (vType < 1.5) {
-            sizeMultiplier = 0.6 + 0.4 * sin(uTime * 3.0 + position.x * 10.0);
-          } else if (vType < 2.5) {
-            sizeMultiplier = 0.8 + 0.2 * sin(uTime * 2.0 + position.y * 5.0);
-          } else if (vType < 3.5) {
-            sizeMultiplier = 0.3 + 0.7 * (0.5 + 0.5 * sin(uTime * 4.0 + position.x * 8.0 + position.z * 6.0));
-          } else {
-            sizeMultiplier = 0.7 + 0.3 * sin(uTime * 5.0 + position.z * 12.0);
-          }
-          
-          float lifeFade = sin(vLife * 3.14159);
-          
-          gl_PointSize = aSize * sizeMultiplier * lifeFade * uPixelRatio * 100.0 / -mvPosition.z;
-          gl_Position = projectionMatrix * mvPosition;
-        }
-      `,
-      fragmentShader: `
-        varying vec3 vColor;
-        varying float vLife;
-        varying float vGlow;
-        varying float vType;
-        varying float vRotation;
-
-        void main() {
-          vec2 center = gl_PointCoord - vec2(0.5);
-          float dist = length(center);
-          
-          float alpha = 0.0;
-          vec3 color = vColor;
-          
-          float lifeFade = sin(vLife * 3.14159);
-          
-          if (vType < 0.5) {
-            float cosR = cos(vRotation);
-            float sinR = sin(vRotation);
-            vec2 rotated = vec2(
-              center.x * cosR - center.y * sinR,
-              center.x * sinR + center.y * cosR
-            );
-            
-            float petalShape = 1.0 - (abs(rotated.x) * 0.8 + abs(rotated.y) * 1.2);
-            petalShape = smoothstep(0.0, 0.3, petalShape);
-            
-            alpha = petalShape * 0.8 * lifeFade;
-            
-            vec3 petalColor = vColor * (0.8 + 0.4 * (0.5 + 0.5 * sin(rotated.x * 5.0 + vRotation)));
-            color = petalColor;
-          } 
-          else if (vType < 1.5) {
-            alpha = smoothstep(0.5, 0.0, dist);
-            alpha = pow(alpha, 0.8) * lifeFade;
-            
-            float sparkle = 0.5 + 0.5 * sin(dist * 20.0 - vLife * 50.0);
-            color = vColor * (1.0 + sparkle * 0.5);
-          }
-          else if (vType < 2.5) {
-            vec2 uv = gl_PointCoord * 2.0 - 1.0;
-            float x = uv.x * 1.2;
-            float y = -uv.y * 1.2 + 0.15;
-            
-            float heart = pow(x * x + y * y - 0.25, 3.0) - x * x * y * y * y;
-            float heartMask = heart < 0.0 ? 1.0 : 0.0;
-            
-            float glow = smoothstep(0.6, 0.0, dist);
-            
-            alpha = (heartMask * 0.9 + glow * 0.3) * lifeFade;
-            
-            float innerGlow = smoothstep(0.3, 0.0, dist) * vGlow;
-            color = vColor * (1.0 + innerGlow);
-          }
-          else if (vType < 3.5) {
-            float core = smoothstep(0.3, 0.0, dist);
-            float glow = smoothstep(0.5, 0.0, dist) * 0.5;
-            
-            alpha = (core + glow * vGlow) * lifeFade;
-            
-            float flicker = 0.7 + 0.3 * sin(vLife * 20.0);
-            color = vColor * flicker;
-          }
-          else {
-            float star = smoothstep(0.15, 0.0, dist);
-            float rays = 0.0;
-            
-            float angle = atan(center.y, center.x);
-            rays = 0.3 * smoothstep(0.5, 0.0, abs(fract(angle * 4.0 / 6.28318 * 4.0 - 0.5) * 2.0 - 1.0))
-                   * smoothstep(0.5, 0.0, dist);
-            
-            float glow = smoothstep(0.5, 0.0, dist) * 0.4 * vGlow;
-            
-            alpha = (star + rays + glow) * lifeFade;
-            
-            color = vColor * (1.0 + vGlow * 0.5);
-          }
-          
-          if (vGlow > 0.5) {
-            float glowAlpha = smoothstep(0.5, 0.0, dist) * 0.3 * vGlow * lifeFade;
-            alpha = max(alpha, glowAlpha);
-          }
-          
-          gl_FragColor = vec4(color, alpha);
-        }
-      `,
+      vertexShader,
+      fragmentShader,
       transparent: true,
       depthWrite: false,
+      depthTest: false,
       blending: THREE.AdditiveBlending,
     });
 
@@ -215,6 +233,8 @@ export class ParticleEngine {
         rotation: 0,
         rotationSpeed: 0,
         type: 0,
+        glow: 1,
+        opacity: 1,
         active: false,
         emitterId: '',
       });
@@ -281,7 +301,14 @@ export class ParticleEngine {
 
     let particle = this.particles.find((p) => !p.active);
     if (!particle) {
-      const oldestIdx = this.particles.findIndex((p) => p.active);
+      let oldestTime = Infinity;
+      let oldestIdx = -1;
+      for (let i = 0; i < this.particles.length; i++) {
+        if (this.particles[i].active && this.particles[i].life < oldestTime) {
+          oldestTime = this.particles[i].life;
+          oldestIdx = i;
+        }
+      }
       if (oldestIdx >= 0) {
         particle = this.particles[oldestIdx];
         particle.active = false;
@@ -298,55 +325,82 @@ export class ParticleEngine {
     particle.type = typeIndex;
     particle.active = true;
     particle.life = 0;
-    particle.maxLife = 2 + Math.random() * 3;
+    particle.glow = config.glow;
+    particle.opacity = config.opacity;
 
-    particle.position.set(
-      (Math.random() - 0.5) * spread,
-      8 + Math.random() * 2,
-      (Math.random() - 0.5) * spread
-    );
-
-    if (emitter.type === 'heart-glow') {
-      particle.position.y = -2 + Math.random() * 2;
-      particle.velocity.set(
-        (Math.random() - 0.5) * 0.5,
-        speed * (0.8 + Math.random() * 0.4),
-        (Math.random() - 0.5) * 0.5
-      );
-    } else if (emitter.type === 'firefly') {
-      particle.position.set(
-        (Math.random() - 0.5) * spread,
-        Math.random() * 4,
-        (Math.random() - 0.5) * spread
-      );
-      particle.velocity.set(
-        (Math.random() - 0.5) * speed * 0.5,
-        (Math.random() - 0.5) * speed * 0.3,
-        (Math.random() - 0.5) * speed * 0.5
-      );
-    } else if (emitter.type === 'star-rain') {
-      particle.position.set(
-        (Math.random() - 0.5) * spread,
-        10 + Math.random() * 3,
-        (Math.random() - 0.5) * spread * 0.5
-      );
-      particle.velocity.set(
-        config.windSpeed * 0.5,
-        -speed * (0.8 + Math.random() * 0.4),
-        (Math.random() - 0.5) * speed * 0.3
-      );
-    } else {
-      particle.velocity.set(
-        Math.sin(windRad) * config.windSpeed * 0.5 + (Math.random() - 0.5) * 0.3,
-        -speed * (0.7 + Math.random() * 0.6),
-        Math.cos(windRad) * config.windSpeed * 0.5 + (Math.random() - 0.5) * 0.3
-      );
+    switch (typeIndex) {
+      case 0:
+        particle.maxLife = 3 + Math.random() * 3;
+        particle.position.set(
+          (Math.random() - 0.5) * spread,
+          6 + Math.random() * 3,
+          (Math.random() - 0.5) * spread * 0.6
+        );
+        particle.velocity.set(
+          Math.sin(windRad) * config.windSpeed * 0.5 + (Math.random() - 0.5) * 0.5,
+          -speed * (0.6 + Math.random() * 0.5),
+          Math.cos(windRad) * config.windSpeed * 0.5 + (Math.random() - 0.5) * 0.3
+        );
+        break;
+      case 1:
+        particle.maxLife = 2 + Math.random() * 2;
+        particle.position.set(
+          (Math.random() - 0.5) * spread,
+          5 + Math.random() * 4,
+          (Math.random() - 0.5) * spread
+        );
+        particle.velocity.set(
+          Math.sin(windRad) * config.windSpeed * 0.8 + (Math.random() - 0.5) * 0.2,
+          -speed * (0.4 + Math.random() * 0.4),
+          Math.cos(windRad) * config.windSpeed * 0.8 + (Math.random() - 0.5) * 0.2
+        );
+        break;
+      case 2:
+        particle.maxLife = 2.5 + Math.random() * 2;
+        particle.position.set(
+          (Math.random() - 0.5) * spread,
+          -1 + Math.random() * 1,
+          (Math.random() - 0.5) * spread * 0.5
+        );
+        particle.velocity.set(
+          (Math.random() - 0.5) * 0.4,
+          speed * (0.7 + Math.random() * 0.5),
+          (Math.random() - 0.5) * 0.3
+        );
+        break;
+      case 3:
+        particle.maxLife = 3 + Math.random() * 3;
+        particle.position.set(
+          (Math.random() - 0.5) * spread,
+          Math.random() * 5,
+          (Math.random() - 0.5) * spread
+        );
+        particle.velocity.set(
+          (Math.random() - 0.5) * speed * 0.4,
+          (Math.random() - 0.5) * speed * 0.3,
+          (Math.random() - 0.5) * speed * 0.4
+        );
+        break;
+      case 4:
+      default:
+        particle.maxLife = 1.5 + Math.random() * 1.5;
+        particle.position.set(
+          (Math.random() - 0.5) * spread,
+          8 + Math.random() * 2,
+          (Math.random() - 0.5) * spread * 0.4
+        );
+        particle.velocity.set(
+          config.windSpeed * 0.3,
+          -speed * (0.8 + Math.random() * 0.5),
+          (Math.random() - 0.5) * speed * 0.2
+        );
+        break;
     }
 
     particle.color.set(config.color);
-    particle.size = config.size * (0.7 + Math.random() * 0.6);
+    particle.size = config.size * (0.8 + Math.random() * 0.5);
     particle.rotation = Math.random() * Math.PI * 2;
-    particle.rotationSpeed = (Math.random() - 0.5) * config.rotationSpeed * 2;
+    particle.rotationSpeed = (Math.random() - 0.5) * config.rotationSpeed * 2.5;
   }
 
   private updateParticles(deltaTime: number): void {
@@ -367,23 +421,23 @@ export class ParticleEngine {
         const windRad = (config.windDirection * Math.PI) / 180;
 
         if (p.type === 3) {
-          p.velocity.x += (Math.random() - 0.5) * deltaTime * 2;
-          p.velocity.y += (Math.random() - 0.5) * deltaTime * 1.5;
-          p.velocity.z += (Math.random() - 0.5) * deltaTime * 2;
+          p.velocity.x += (Math.random() - 0.5) * deltaTime * 2.5;
+          p.velocity.y += (Math.random() - 0.5) * deltaTime * 1.8;
+          p.velocity.z += (Math.random() - 0.5) * deltaTime * 2.5;
           
-          p.velocity.x *= 0.98;
-          p.velocity.y *= 0.98;
-          p.velocity.z *= 0.98;
+          p.velocity.x *= 0.975;
+          p.velocity.y *= 0.975;
+          p.velocity.z *= 0.975;
         } else {
-          p.velocity.x += Math.sin(windRad) * config.windSpeed * deltaTime * 0.5;
-          p.velocity.z += Math.cos(windRad) * config.windSpeed * deltaTime * 0.5;
+          p.velocity.x += Math.sin(windRad) * config.windSpeed * deltaTime * 0.6;
+          p.velocity.z += Math.cos(windRad) * config.windSpeed * deltaTime * 0.6;
         }
       }
 
       p.position.addScaledVector(p.velocity, deltaTime);
       p.rotation += p.rotationSpeed * deltaTime;
 
-      if (p.position.y < -5) {
+      if (p.position.y < -5 || p.position.y > 12) {
         p.active = false;
       }
     }
@@ -409,8 +463,9 @@ export class ParticleEngine {
       this.lifeAttribute[activeCount] = p.life;
       this.maxLifeAttribute[activeCount] = p.maxLife;
       this.rotationAttribute[activeCount] = p.rotation;
-      this.glowAttribute[activeCount] = 1;
+      this.glowAttribute[activeCount] = p.glow;
       this.typeAttribute[activeCount] = p.type;
+      this.opacityAttribute[activeCount] = p.opacity;
 
       activeCount++;
     }
@@ -426,6 +481,7 @@ export class ParticleEngine {
     (this.geometry.attributes.aRotation as THREE.BufferAttribute).needsUpdate = true;
     (this.geometry.attributes.aGlow as THREE.BufferAttribute).needsUpdate = true;
     (this.geometry.attributes.aType as THREE.BufferAttribute).needsUpdate = true;
+    (this.geometry.attributes.aOpacity as THREE.BufferAttribute).needsUpdate = true;
   }
 
   public clear(): void {

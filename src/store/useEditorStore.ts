@@ -50,7 +50,7 @@ export const useEditorStore = create<EditorState & EditorActions>((set, get) => 
     isLooping: true,
     playbackRate: 1,
   },
-  selectedEmitterId: null,
+  selectedEmitterId: demoProject.emitters[0]?.id || null,
   zoom: 50,
   scrollLeft: 0,
 
@@ -62,7 +62,7 @@ export const useEditorStore = create<EditorState & EditorActions>((set, get) => 
         duration: project.duration,
         currentTime: 0,
       },
-      selectedEmitterId: null,
+      selectedEmitterId: project.emitters[0]?.id || null,
     }),
 
   addEmitter: (type, startTime, track) => {
